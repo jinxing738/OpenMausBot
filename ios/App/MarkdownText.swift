@@ -34,16 +34,15 @@ struct MarkdownText: View {
         switch block {
         case let .paragraph(text):
             inline(text, tail: tail)
-                .font(.system(size: 17))
+                .font(.system(size: 15.5))
+                .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)
 
         case let .heading(level, text):
-            // Three sizes, not six. A chat bubble is not a document, and an
-            // h4 that looks exactly like body text is a heading that failed.
             inline(text, tail: tail)
-                .font(.system(size: level <= 1 ? 21 : level == 2 ? 19 : 17, weight: .semibold))
+                .font(.system(size: level <= 1 ? 18 : 16.5, weight: .semibold))
+                .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 2)
 
         case let .bullet(indent, text):
             marker("•", indent: indent, text: text, tail: tail)
@@ -53,12 +52,13 @@ struct MarkdownText: View {
 
         case let .quote(text):
             HStack(alignment: .top, spacing: 8) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.secondary.opacity(0.4))
-                    .frame(width: 3)
+                Capsule()
+                    .fill(Color.primary.opacity(0.28))
+                    .frame(width: 2.5)
                 inline(text, tail: tail)
-                    .font(.system(size: 17))
-                    .foregroundStyle(Color.secondary)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(3)
             }
             .fixedSize(horizontal: false, vertical: true)
 
@@ -66,23 +66,51 @@ struct MarkdownText: View {
             VStack(alignment: .leading, spacing: 4) {
                 if let language, !language.isEmpty {
                     Text(language)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.secondary)
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
                 }
                 // Horizontal scroll rather than wrapping: wrapped code is
                 // harder to read than code you have to push sideways, and
                 // indentation is most of what a snippet is saying.
                 ScrollView(.horizontal, showsIndicators: false) {
                     (Text(text) + caretText(tail))
-                        .font(.system(size: 14, design: .monospaced))
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .lineSpacing(2)
                         .textSelection(.enabled)
                 }
             }
-            .padding(10)
+            .padding(9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.secondary.opacity(0.14))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.black.opacity(0.16))
+            )
+
+        case let .table(header, rows):
+            ScrollView(.horizontal, showsIndicators: false) {
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+                    GridRow {
+                        ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
+                            inline(cell)
+                                .font(.system(size: 12.5, weight: .semibold))
+                        }
+                    }
+                    Divider()
+                        .gridCellColumns(max(1, header.count))
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        GridRow {
+                            ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                                inline(cell)
+                                    .font(.system(size: 12.5))
+                            }
+                        }
+                    }
+                }
+                .padding(9)
+            }
+            .background(
+                Color.primary.opacity(0.05),
+                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
             )
 
         case .rule:
@@ -91,12 +119,21 @@ struct MarkdownText: View {
     }
 
     private func marker(_ symbol: String, indent: Int, text: String, tail: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(symbol)
-                .font(.system(size: 17))
-                .foregroundStyle(Color.secondary)
-                .frame(minWidth: 16, alignment: .trailing)
-            inline(text, tail: tail).font(.system(size: 17))
+        HStack(alignment: .top, spacing: 7) {
+            if symbol == "•" {
+                Circle()
+                    .fill(Color.primary.opacity(0.45))
+                    .frame(width: 4, height: 4)
+                    .padding(.top, 8)
+            } else {
+                Text(symbol)
+                    .font(.system(size: 15.5))
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 16, alignment: .trailing)
+            }
+            inline(text, tail: tail)
+                .font(.system(size: 15.5))
+                .lineSpacing(3)
         }
         .padding(.leading, CGFloat(indent) * 14)
         .fixedSize(horizontal: false, vertical: true)

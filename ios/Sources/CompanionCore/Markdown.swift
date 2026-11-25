@@ -27,6 +27,7 @@ public enum MarkdownBlock: Equatable, Sendable {
     /// A fenced block. `language` is whatever followed the opening fence.
     case code(language: String?, text: String)
     case quote(String)
+    case table(header: [String], rows: [[String]])
     case rule
 }
 
@@ -98,6 +99,23 @@ public enum Markdown {
                 continue
             }
 
+            // GFM table: a header row followed by |---|:---:| separators.
+            if trimmed.hasPrefix("|"), let delimiter = lines.first,
+               tableDelimiter(delimiter) {
+                flushParagraph()
+                let header = tableCells(trimmed)
+                lines = lines.dropFirst()
+                var rows: [[String]] = []
+                while let row = lines.first {
+                    let cellsText = row.trimmingCharacters(in: .whitespaces)
+                    guard cellsText.hasPrefix("|") else { break }
+                    lines = lines.dropFirst()
+                    rows.append(tableCells(cellsText))
+                }
+                blocks.append(.table(header: header, rows: rows))
+                continue
+            }
+
             if trimmed.hasPrefix(">") {
                 flushParagraph()
                 blocks.append(.quote(String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)))
@@ -145,5 +163,19 @@ public enum Markdown {
             }
         }
         return nil
+    }
+
+    private static func tableDelimiter(_ line: String) -> Bool {
+        line.replacingOccurrences(of: " ", with: "")
+            .range(of: #"^\|?[:\-|]+\|?$"#, options: .regularExpression) != nil
+    }
+
+    private static func tableCells(_ line: String) -> [String] {
+        var text = line.trimmingCharacters(in: .whitespaces)
+        if text.hasPrefix("|") { text.removeFirst() }
+        if text.hasSuffix("|") { text.removeLast() }
+        return text.components(separatedBy: "|").map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }
     }
 }

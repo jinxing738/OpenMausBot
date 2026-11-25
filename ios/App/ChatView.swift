@@ -6,6 +6,8 @@
 // did that and having two folds is how two clients start disagreeing.
 import SwiftUI
 import CompanionCore
+import PhotosUI
+import UniformTypeIdentifiers
 // Unconditional, because the uses below are: `Color(uiColor:)` and
 // `UIImage(data:)` are reached on every path through this file. A
 // `canImport` guard around the import alone does not make the file portable
@@ -23,6 +25,13 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var showingTasks = false
     @State private var shareFile: ShareFile?
+    @State private var showingComposerMenu = false
+    @State private var showingAttachmentKinds = false
+    @State private var showPhotos = false
+    @State private var showFiles = false
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var pendingAttachments: [DraftAttachment] = []
+    @State private var attachmentError: String?
     /// StaffMate 的对话页把聊天记录和输入区拆在 ZStack 的两层，
     /// 输入区高度通过 preference 回写给正文留白。这里沿用同一套结构。
     @State private var composerHeight: CGFloat = 62
@@ -116,6 +125,52 @@ struct ChatView: View {
         }
         .sheet(item: $shareFile) { file in
             ActivityShareSheet(items: [file.url])
+        }
+        .photosPicker(
+            isPresented: $showPhotos,
+            selection: $photoItems,
+            maxSelectionCount: 9,
+            matching: .images
+        )
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty else { return }
+            photoItems = []
+            Task { await loadPhotos(items) }
+        }
+        .fileImporter(
+            isPresented: $showFiles,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case .success(let urls):
+                Task { await loadFiles(urls) }
+            case .failure(let error):
+                attachmentError = error.localizedDescription
+            }
+        }
+        .confirmationDialog("添加附件", isPresented: $showingAttachmentKinds, titleVisibility: .visible) {
+            Button("照片") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                    showPhotos = true
+                }
+            }
+            Button("文件") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                    showFiles = true
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("选择照片或电脑中的文件")
+        }
+        .alert("附件没有添加", isPresented: Binding(
+            get: { attachmentError != nil },
+            set: { if !$0 { attachmentError = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(attachmentError ?? "")
         }
     }
 
@@ -333,79 +388,340 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasText = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasReadyAttachment = pendingAttachments.contains { $0.remote != nil }
+        let uploading = pendingAttachments.contains { $0.isUploading }
+        return (hasText || hasReadyAttachment) && !uploading
     }
 
     private func submit() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canSend else { return }
+        let text = composedDraft()
         guard !text.isEmpty else { return }
         draft = ""
+        pendingAttachments = []
+        composerFocused = false
         Task { await session.send(text, to: current) }
     }
 
-    /// StaffMate ChatComposer.composerBar：43pt 高，半径 21.5pt。
-    /// OpenMaus 没有附件和语音上传协议，因此不摆无法执行的圆钮。
-    private var composer: some View {
-        HStack(alignment: .bottom, spacing: 9) {
-            HStack(alignment: .bottom, spacing: 2) {
-                TextField(
-                    "给 \(current.name) 发消息",
-                    text: $draft,
-                    axis: .vertical
-                )
-                .font(.system(size: 15.5))
-                .lineLimit(1...5)
-                .focused($composerFocused)
-                .padding(.leading, 14)
-                .padding(.trailing, canSend || current.busy ? 2 : 0)
-                .padding(.vertical, 10)
-                .frame(minHeight: 43, alignment: .leading)
-                .submitLabel(.send)
-                .onKeyPress(.return, phases: .down) { press in
-                    guard !press.modifiers.contains(.shift) else { return .ignored }
-                    submit()
-                    return .handled
-                }
-                .onSubmit(submit)
+    private func composedDraft() -> String {
+        var parts = [draft.trimmingCharacters(in: .whitespacesAndNewlines)]
+        for attachment in pendingAttachments {
+            guard let remote = attachment.remote else { continue }
+            let tag = attachment.isImage ? "attached-image" : "attached-file"
+            let path = escapedAttribute(remote.path)
+            let name = escapedAttribute(remote.name)
+            parts.append("<\(tag) path=\"\(path)\" name=\"\(name)\" />")
+        }
+        return parts.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
 
-                if current.busy, case let .bot(bot) = current {
-                    Button {
-                        Task { await session.interrupt(bot: bot) }
-                    } label: {
-                        Image(systemName: "stop.fill")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(ChatDesign.accentInk)
-                            .frame(width: 33, height: 33)
-                            .background(ChatDesign.accent, in: Circle())
+    private func escapedAttribute(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\t", with: "&#9;")
+            .replacingOccurrences(of: "\r", with: "&#13;")
+            .replacingOccurrences(of: "\n", with: "&#10;")
+    }
+
+    private func teachATask() {
+        let template = """
+        我想教你一项任务：
+
+        任务目标：
+        背景与所需材料：
+        执行步骤：
+        完成标准：
+
+        请先复述你对任务的理解和计划，确认无误后再执行；完成后请记住可复用的步骤。
+        """
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            draft = template
+        } else {
+            draft += "\n\n\(template)"
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+            composerFocused = true
+        }
+    }
+
+    @MainActor
+    private func loadPhotos(_ items: [PhotosPickerItem]) async {
+        for (offset, item) in items.enumerated() {
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self),
+                      let prepared = PreparedDraftImage.make(
+                        data,
+                        type: item.supportedContentTypes.first(where: { $0.conforms(to: .image) })
+                      )
+                else { throw AttachmentPreparationError.notAnImage }
+                await upload(
+                    data: prepared.data,
+                    name: "照片-\(Self.attachmentTimestamp())-\(offset + 1).\(prepared.ext)",
+                    mime: prepared.mime,
+                    image: prepared.image,
+                    isImage: true
+                )
+            } catch {
+                attachmentError = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func loadFiles(_ urls: [URL]) async {
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer {
+                if scoped { url.stopAccessingSecurityScopedResource() }
+            }
+            do {
+                let data = try Data(contentsOf: url)
+                let type = UTType(filenameExtension: url.pathExtension)
+                    ?? UTType(mimeType: "application/octet-stream")
+                if type?.conforms(to: .image) == true,
+                   let prepared = PreparedDraftImage.make(data, type: type) {
+                    await upload(
+                        data: prepared.data,
+                        name: url.lastPathComponent.isEmpty
+                            ? "图片.\(prepared.ext)"
+                            : url.deletingPathExtension().lastPathComponent + ".\(prepared.ext)",
+                        mime: prepared.mime,
+                        image: prepared.image,
+                        isImage: true
+                    )
+                } else {
+                    await upload(
+                        data: data,
+                        name: url.lastPathComponent.isEmpty ? "附件" : url.lastPathComponent,
+                        mime: type?.preferredMIMEType ?? "application/octet-stream",
+                        image: nil,
+                        isImage: false
+                    )
+                }
+            } catch {
+                attachmentError = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func upload(
+        data: Data,
+        name: String,
+        mime: String,
+        image: UIImage?,
+        isImage: Bool
+    ) async {
+        let item = DraftAttachment(
+            name: name,
+            mime: mime,
+            preview: image,
+            isImage: isImage
+        )
+        pendingAttachments.append(item)
+        do {
+            let remote = if isImage {
+                try await session.uploadImage(data, mime: mime)
+            } else {
+                try await session.uploadFile(data, name: name, mime: mime)
+            }
+            if let index = pendingAttachments.firstIndex(where: { $0.id == item.id }) {
+                pendingAttachments[index].remote = remote
+                if !remote.name.isEmpty {
+                    pendingAttachments[index].name = remote.name
+                }
+            } else {
+                session.discardAttachment(remote)
+            }
+        } catch {
+            if let index = pendingAttachments.firstIndex(where: { $0.id == item.id }) {
+                pendingAttachments[index].failure = error.localizedDescription
+            }
+            attachmentError = error.localizedDescription
+        }
+    }
+
+    private func removeDraftAttachment(_ item: DraftAttachment) {
+        if let remote = item.remote {
+            session.discardAttachment(remote)
+        }
+        withAnimation(.easeOut(duration: 0.16)) {
+            pendingAttachments.removeAll { $0.id == item.id }
+        }
+    }
+
+    private static func attachmentTimestamp() -> String {
+        Date().formatted(.dateTime.hour().minute().second())
+            .replacingOccurrences(of: ":", with: "-")
+    }
+
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(pendingAttachments) { item in
+                    ZStack(alignment: .topTrailing) {
+                        Group {
+                            if let preview = item.preview {
+                                Image(uiImage: preview)
+                                    .resizable()
+                                    .scaledToFill()
+                            } else {
+                                ZStack {
+                                    Color.primary.opacity(0.07)
+                                    Image(systemName: "doc.fill")
+                                        .font(.system(size: 18, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .frame(width: 54, height: 54)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                        }
+
+                        if item.isUploading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 54, height: 54)
+                        } else if item.failure != nil {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.orange)
+                                .padding(4)
+                        }
+
+                        Button {
+                            removeDraftAttachment(item)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 15))
+                                .foregroundStyle(.white)
+                                .background(Color.black.opacity(0.55), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 5, y: -5)
+                        .accessibilityLabel("移除 \(item.name)")
                     }
-                    .buttonStyle(.plain)
-                    .frame(width: 43, height: 43)
-                    .accessibilityLabel("停止任务")
-                } else if canSend {
-                    Button {
-                        submit()
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(ChatDesign.accentInk)
-                            .frame(width: 33, height: 33)
-                            .background(ChatDesign.accent, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .frame(width: 43, height: 43)
-                    .accessibilityLabel("发送")
+                    .padding(.top, 5)
+                    .accessibilityLabel(item.name)
                 }
             }
-            .chatGlassSurface(
-                RoundedRectangle(cornerRadius: 21.5, style: .continuous)
-            )
-            .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+        }
+    }
+
+    /// StaffMate ChatComposer.composerBar：43pt 高，半径 21.5pt。
+    private var composer: some View {
+        VStack(spacing: 8) {
+            if !pendingAttachments.isEmpty {
+                attachmentStrip
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            HStack(alignment: .bottom, spacing: 9) {
+                Button {
+                    composerFocused = false
+                    showingComposerMenu = true
+                } label: {
+                    ChatHeaderGlassButton(size: 43) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(Color.primary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("添加附件或教它一项任务")
+                .popover(isPresented: $showingComposerMenu, arrowEdge: .bottom) {
+                    ComposerActionCard(
+                        addAttachment: {
+                            showingComposerMenu = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                                showingAttachmentKinds = true
+                            }
+                        },
+                        teachTask: {
+                            showingComposerMenu = false
+                            teachATask()
+                        }
+                    )
+                    .presentationCompactAdaptation(.popover)
+                    .presentationBackground(.clear)
+                }
+
+                HStack(alignment: .bottom, spacing: 2) {
+                    TextField(
+                        "给 \(current.name) 发消息",
+                        text: $draft,
+                        axis: .vertical
+                    )
+                    .font(.system(size: 15.5))
+                    .lineLimit(1...5)
+                    .focused($composerFocused)
+                    .padding(.leading, 14)
+                    .padding(.trailing, canSend || current.busy ? 2 : 0)
+                    .padding(.vertical, 10)
+                    .frame(minHeight: 43, alignment: .leading)
+                    .submitLabel(.send)
+                    .onKeyPress(.return, phases: .down) { press in
+                        guard !press.modifiers.contains(.shift) else { return .ignored }
+                        submit()
+                        return .handled
+                    }
+                    .onSubmit(submit)
+
+                    if current.busy, case let .bot(bot) = current {
+                        Button {
+                            Task { await session.interrupt(bot: bot) }
+                        } label: {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(ChatDesign.accentInk)
+                                .frame(width: 33, height: 33)
+                                .background(ChatDesign.accent, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .frame(width: 43, height: 43)
+                        .accessibilityLabel("停止任务")
+                    } else if canSend {
+                        Button {
+                            submit()
+                        } label: {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(ChatDesign.accentInk)
+                                .frame(width: 33, height: 33)
+                                .background(ChatDesign.accent, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .frame(width: 43, height: 43)
+                        .accessibilityLabel("发送")
+                        .transition(
+                            .asymmetric(
+                                insertion: .scale(scale: 0.62).combined(with: .opacity),
+                                removal: .scale(scale: 0.82).combined(with: .opacity)
+                            )
+                        )
+                    }
+                }
+                .chatGlassSurface(
+                    RoundedRectangle(cornerRadius: 21.5, style: .continuous)
+                )
+                .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
         .padding(.bottom, 6)
         .animation(.spring(response: 0.26, dampingFraction: 0.82), value: canSend)
         .animation(.spring(response: 0.26, dampingFraction: 0.82), value: current.busy)
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: pendingAttachments.count)
     }
 
     private var windowBottomInset: CGFloat {
@@ -414,6 +730,150 @@ struct ChatView: View {
             .flatMap(\.windows)
             .first(where: \.isKeyWindow)?
             .safeAreaInsets.bottom ?? 0
+    }
+}
+
+private struct DraftAttachment: Identifiable {
+    let id = UUID()
+    var name: String
+    var mime: String
+    var preview: UIImage?
+    var isImage: Bool
+    var remote: UploadedAttachment?
+    var failure: String?
+
+    var isUploading: Bool { remote == nil && failure == nil }
+}
+
+private enum AttachmentPreparationError: LocalizedError {
+    case notAnImage
+
+    var errorDescription: String? {
+        switch self {
+        case .notAnImage: return "这张照片无法读取。"
+        }
+    }
+}
+
+private struct PreparedDraftImage {
+    let data: Data
+    let mime: String
+    let ext: String
+    let image: UIImage
+
+    private static let uploadLimit = 9_500_000
+
+    static func make(_ data: Data, type: UTType?) -> PreparedDraftImage? {
+        guard let image = UIImage(data: data) else { return nil }
+        let bytes = [UInt8](data.prefix(4))
+        let isGif = bytes.count == 4
+            && bytes[0] == 0x47 && bytes[1] == 0x49
+            && bytes[2] == 0x46 && bytes[3] == 0x38
+        if isGif {
+            return PreparedDraftImage(data: data, mime: "image/gif", ext: "gif", image: image)
+        }
+
+        let isPng = bytes.count == 4
+            && bytes[0] == 0x89 && bytes[1] == 0x50
+            && bytes[2] == 0x4E && bytes[3] == 0x47
+        if isPng, data.count <= uploadLimit {
+            return PreparedDraftImage(data: data, mime: "image/png", ext: "png", image: image)
+        }
+
+        let resized = resize(image, maxEdge: 3000)
+        var quality: CGFloat = 0.9
+        var jpeg = resized.jpegData(compressionQuality: quality)
+        while let current = jpeg, current.count > uploadLimit, quality > 0.5 {
+            quality -= 0.1
+            jpeg = resized.jpegData(compressionQuality: quality)
+        }
+        if let current = jpeg, current.count > uploadLimit {
+            let smaller = resize(resized, maxEdge: 1800)
+            jpeg = smaller.jpegData(compressionQuality: 0.72)
+        }
+        guard let jpeg else { return nil }
+        return PreparedDraftImage(data: jpeg, mime: "image/jpeg", ext: "jpg", image: resized)
+    }
+
+    private static func resize(_ image: UIImage, maxEdge: CGFloat) -> UIImage {
+        let longest = max(image.size.width, image.size.height)
+        guard longest > maxEdge, longest > 0 else { return image }
+        let scale = maxEdge / longest
+        let target = CGSize(
+            width: max(1, (image.size.width * scale).rounded()),
+            height: max(1, (image.size.height * scale).rounded())
+        )
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: target, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: target))
+        }
+    }
+}
+
+private struct ComposerActionCard: View {
+    let addAttachment: () -> Void
+    let teachTask: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            row(
+                "添加附件",
+                detail: "照片或文件",
+                symbol: "paperclip",
+                action: addAttachment
+            )
+            Divider()
+                .padding(.leading, 50)
+            row(
+                "教它一项任务",
+                detail: "写下目标与完成标准",
+                symbol: "graduationcap",
+                action: teachTask
+            )
+        }
+        .padding(6)
+        .frame(width: 246)
+        .background(
+            .ultraThinMaterial,
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.14), radius: 20, y: 8)
+    }
+
+    private func row(
+        _ title: String,
+        detail: String,
+        symbol: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: symbol)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 32, height: 32)
+                    .background(Color.primary.opacity(0.07), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 15.5, weight: .medium))
+                        .foregroundStyle(Color.primary)
+                    Text(detail)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 54)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -577,6 +1037,10 @@ struct TextBubble: View {
 
     var body: some View {
         let mine = message.role == .user
+        let payload = RenderedMessagePayload(
+            text: message.text ?? "",
+            decodedAttachments: message.attachments ?? []
+        )
         VStack(alignment: .leading, spacing: 4) {
             // rooms attribute each line to the member who said it
             if let from = message.from {
@@ -588,16 +1052,21 @@ struct TextBubble: View {
             // makes. Markdown you did not intend is worse than markdown
             // you did: a message about `**` should show the asterisks.
             if mine {
-                Text(message.text ?? "")
-                    .font(.system(size: 17))
+                Text(payload.text)
+                    .font(.system(size: 15.5))
+                    .lineSpacing(4)
                     .foregroundStyle(ChatDesign.accentInk)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                MarkdownText(source: message.text ?? "")
+                MarkdownText(source: payload.text)
                     .foregroundStyle(Color.primary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if !payload.attachments.isEmpty {
+                MessageAttachmentGallery(attachments: payload.attachments)
+                    .padding(.top, payload.text.isEmpty ? 0 : 4)
             }
         }
         // StaffMate ChatMessageRow.bubble：13 × 9、17pt 圆角、0.5pt 描边。
@@ -620,6 +1089,195 @@ struct TextBubble: View {
                 )
         }
         .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+    }
+}
+
+private struct RenderedMessagePayload {
+    let text: String
+    let attachments: [MessageAttachment]
+
+    init(text: String, decodedAttachments: [MessageAttachment]) {
+        let tagPattern = #"<(attached-image|attached-file)\s+([^>]*?)\s*/>"#
+        let expression = try? NSRegularExpression(pattern: tagPattern)
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        var parsed: [MessageAttachment] = []
+
+        expression?.enumerateMatches(in: text, range: range) { match, _, _ in
+            guard let match,
+                  let tagRange = Range(match.range(at: 1), in: text),
+                  let attributeRange = Range(match.range(at: 2), in: text)
+            else { return }
+            let tag = String(text[tagRange])
+            let attributes = String(text[attributeRange])
+            let values = Self.attributes(attributes)
+            guard let path = values["path"], !path.isEmpty else { return }
+            parsed.append(
+                MessageAttachment(
+                    path: path,
+                    name: values["name"],
+                    mime: nil,
+                    kind: tag == "attached-image" ? "image" : "file"
+                )
+            )
+        }
+
+        var seen = Set<String>()
+        self.attachments = (decodedAttachments + parsed).filter {
+            seen.insert($0.path).inserted
+        }
+        self.text = expression?.stringByReplacingMatches(
+            in: text,
+            range: range,
+            withTemplate: ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines) ?? text
+    }
+
+    private static func attributes(_ source: String) -> [String: String] {
+        let pattern = #"([A-Za-z][A-Za-z0-9_-]*)\s*=\s*"([^"]*)""#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [:] }
+        let range = NSRange(source.startIndex..<source.endIndex, in: source)
+        var values: [String: String] = [:]
+        expression.enumerateMatches(in: source, range: range) { match, _, _ in
+            guard let match,
+                  let keyRange = Range(match.range(at: 1), in: source),
+                  let valueRange = Range(match.range(at: 2), in: source)
+            else { return }
+            values[String(source[keyRange])] = unescape(String(source[valueRange]))
+        }
+        return values
+    }
+
+    private static func unescape(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&#9;", with: "\t")
+            .replacingOccurrences(of: "&#13;", with: "\r")
+            .replacingOccurrences(of: "&#10;", with: "\n")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+}
+
+private struct MessageAttachmentGallery: View {
+    let attachments: [MessageAttachment]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(Array(attachments.enumerated()), id: \.offset) { _, attachment in
+                    if attachment.isImage {
+                        RemoteMessageImage(attachment: attachment)
+                    } else {
+                        MessageFileChip(attachment: attachment)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: 286, alignment: .leading)
+    }
+}
+
+private struct RemoteMessageImage: View {
+    let attachment: MessageAttachment
+    @EnvironmentObject private var session: Session
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ZStack {
+                    Color.black.opacity(0.06)
+                    ProgressView().controlSize(.small)
+                }
+            }
+        }
+        .frame(width: 168, height: 132)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+        }
+        .task(id: attachment.path) {
+            guard image == nil,
+                  let data = await session.attachmentData(attachment),
+                  let loaded = UIImage(data: data)
+            else { return }
+            image = loaded
+        }
+        .accessibilityLabel(attachment.name ?? "图片附件")
+    }
+}
+
+private struct MessageFileChip: View {
+    let attachment: MessageAttachment
+    @EnvironmentObject private var session: Session
+    @State private var shareFile: ShareFile?
+    @State private var loading = false
+
+    var body: some View {
+        Button {
+            guard !loading else { return }
+            loading = true
+            Task {
+                defer { loading = false }
+                guard let data = await session.attachmentData(attachment) else { return }
+                let name = attachment.displayName
+                let folder = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("OpenMausAttachments", isDirectory: true)
+                try? FileManager.default.createDirectory(
+                    at: folder,
+                    withIntermediateDirectories: true
+                )
+                let url = folder.appendingPathComponent(name)
+                try? data.write(to: url, options: .atomic)
+                shareFile = ShareFile(url: url)
+            }
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 16, weight: .medium))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(attachment.displayName)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .lineLimit(1)
+                    Text(loading ? "正在准备…" : "文件")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 11)
+            .frame(height: 52)
+            .background(
+                Color.primary.opacity(0.07),
+                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+            )
+        }
+        .buttonStyle(.plain)
+        .sheet(item: $shareFile) { file in
+            ActivityShareSheet(items: [file.url])
+        }
+    }
+}
+
+private extension MessageAttachment {
+    var isImage: Bool {
+        kind == "image" || mime?.lowercased().hasPrefix("image/") == true
+    }
+
+    var displayName: String {
+        if let name, !name.isEmpty { return name }
+        return path.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/")
+            .last
+            .map(String.init) ?? "附件"
     }
 }
 

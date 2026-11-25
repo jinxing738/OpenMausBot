@@ -142,6 +142,13 @@ final class MarkdownTests: XCTestCase {
         XCTAssertEqual(Markdown.blocks("> quoted"), [.quote("quoted")])
     }
 
+    func testTableMatchesTheStaffMateShape() {
+        XCTAssertEqual(
+            Markdown.blocks("| Name | State |\n| --- | --- |\n| Scout | Ready |"),
+            [.table(header: ["Name", "State"], rows: [["Scout", "Ready"]])]
+        )
+    }
+
     func testHorizontalRules() {
         XCTAssertEqual(Markdown.blocks("---"), [.rule])
         XCTAssertEqual(Markdown.blocks("***"), [.rule])
@@ -191,6 +198,7 @@ final class MarkdownTests: XCTestCase {
         case let .heading(_, text): return text
         case let .code(language, text): return (language ?? "") + text
         case let .quote(text): return text
+        case let .table(header, rows): return (header + rows.flatMap { $0 }).joined()
         case .rule: return ""
         }
     }

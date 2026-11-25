@@ -288,6 +288,24 @@ final class Session: ObservableObject {
         }
     }
 
+    func uploadImage(_ data: Data, mime: String) async throws -> UploadedAttachment {
+        guard let client else { throw APIError.transport("尚未连接电脑。") }
+        return try await client.uploadImage(data: data, mime: mime)
+    }
+
+    func uploadFile(_ data: Data, name: String, mime: String) async throws -> UploadedAttachment {
+        guard let client else { throw APIError.transport("尚未连接电脑。") }
+        return try await client.uploadFile(data: data, name: name, mime: mime)
+    }
+
+    func discardAttachment(_ attachment: UploadedAttachment) {
+        Task { try? await client?.discardAttachment(path: attachment.path) }
+    }
+
+    func attachmentData(_ attachment: MessageAttachment) async -> Data? {
+        try? await client?.attachment(path: attachment.path)
+    }
+
     func answer(threadId: String, card: OptionCard, choice: String) async {
         guard let requestId = card.requestId else { return }
         await perform {

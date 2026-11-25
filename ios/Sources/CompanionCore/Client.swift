@@ -326,6 +326,77 @@ public struct CompanionClient: Sendable {
         return data
     }
 
+    /// Fetch a stored image or file by the path carried in a transcript.
+    /// Attachment URLs are message content, so only the server's canonical
+    /// attachment path is accepted here; arbitrary URLs never leave the phone.
+    public func attachment(path: String) async throws -> Data {
+        let normalized = path.replacingOccurrences(of: "\\", with: "/")
+        let name = normalized.split(separator: "/").last.map(String.init) ?? ""
+        guard !name.isEmpty,
+              name != ".",
+              name != "..",
+              !name.contains("/")
+        else { throw APIError.badURL }
+        let request = try makeRequest("GET", "/api/attachments/\(name)")
+        let (data, response) = try await perform(request)
+        try Self.check(response, data)
+        return data
+    }
+
+    /// Upload a photo to the same attachment store the desktop composer
+    /// uses. The UUID makes an interrupted retry idempotent.
+    public func uploadImage(data: Data, mime: String) async throws -> UploadedAttachment {
+        var request = try makeRequest(
+            "POST",
+            "/api/attachments",
+            query: [URLQueryItem(name: "uploadId", value: UUID().uuidString.lowercased())]
+        )
+        request.timeoutInterval = 60
+        request.setValue(mime, forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let saved = try await send(request, as: ImageUploadResponse.self)
+        return UploadedAttachment(
+            path: saved.path,
+            name: UploadedAttachment.displayName(for: saved.path),
+            mime: saved.mime,
+            bytes: saved.bytes
+        )
+    }
+
+    /// Upload a non-image file. The server keeps the original name and
+    /// returns the private path that belongs in `<attached-file>`.
+    public func uploadFile(data: Data, name: String, mime: String) async throws -> UploadedAttachment {
+        var request = try makeRequest(
+            "POST",
+            "/api/files",
+            query: [
+                URLQueryItem(name: "name", value: name),
+                URLQueryItem(name: "uploadId", value: UUID().uuidString.lowercased()),
+            ]
+        )
+        request.timeoutInterval = 60
+        request.setValue(mime, forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let saved = try await send(request, as: FileUploadResponse.self)
+        return UploadedAttachment(
+            path: saved.path,
+            name: saved.name.isEmpty ? name : saved.name,
+            mime: saved.mime,
+            bytes: saved.bytes
+        )
+    }
+
+    /// Best-effort cleanup for an uploaded file the person removed before
+    /// sending. A stale unused upload is recoverable; a failed chat is not.
+    public func discardAttachment(path: String) async throws {
+        let normalized = path.replacingOccurrences(of: "\\", with: "/")
+        let name = normalized.split(separator: "/").last.map(String.init) ?? ""
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw APIError.badURL
+        }
+        try await send(try makeRequest("DELETE", "/api/attachments/\(name)"))
+    }
+
     // MARK: - Doing
 
     /// Make a new bot. The harness picks its name, colour and greeting — the
@@ -468,4 +539,38 @@ public struct CompanionClient: Sendable {
         streamRequest.timeoutInterval = 90
         return eventStream(request: streamRequest, session: Self.streaming)
     }
+}
+
+public struct UploadedAttachment: Sendable, Equatable {
+    public var path: String
+    public var name: String
+    public var mime: String
+    public var bytes: Int
+
+    public init(path: String, name: String, mime: String, bytes: Int) {
+        self.path = path
+        self.name = name
+        self.mime = mime
+        self.bytes = bytes
+    }
+
+    static func displayName(for path: String) -> String {
+        path.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/")
+            .last
+            .map(String.init) ?? "image"
+    }
+}
+
+private struct ImageUploadResponse: Decodable {
+    var path: String
+    var mime: String
+    var bytes: Int
+}
+
+private struct FileUploadResponse: Decodable {
+    var path: String
+    var name: String
+    var mime: String
+    var bytes: Int
 }

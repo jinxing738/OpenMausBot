@@ -65,6 +65,22 @@ public struct CommChip: Codable, Hashable, Sendable {
     public var withColor: String
 }
 
+public struct MessageAttachment: Codable, Hashable, Sendable {
+    public var path: String
+    public var name: String?
+    public var mime: String?
+    public var kind: String?
+    public var size: Int?
+
+    public init(path: String, name: String? = nil, mime: String? = nil, kind: String? = nil, size: Int? = nil) {
+        self.path = path
+        self.name = name
+        self.mime = mime
+        self.kind = kind
+        self.size = size
+    }
+}
+
 public struct Message: Codable, Hashable, Identifiable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case text, options, activity, screen
@@ -110,6 +126,9 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     public var parentId: String?
     /// Rooms: which member said this.
     public var from: Sender?
+    /// Files and images attached to this turn. Older servers omit this and
+    /// keep the same references in `text`; the view understands both shapes.
+    public var attachments: [MessageAttachment]?
     public var reactions: [Reaction]?
     public var comm: CommChip?
     /// Screen messages in the paged shape: the pixels live behind
