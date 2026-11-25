@@ -16,6 +16,7 @@ struct ChatListView: View {
     @State private var path = NavigationPath()
     @State private var searchHits: [SearchHit] = []
     @State private var searching = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -167,6 +168,8 @@ struct ChatListView: View {
                     .font(.system(size: 16))
                     .submitLabel(.search)
                     .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .focused($searchFocused)
 
                 if !query.isEmpty {
                     Button {
@@ -182,9 +185,39 @@ struct ChatListView: View {
             .padding(.horizontal, 14)
             .frame(height: 44)
             .floatingGlass(Capsule(), interactive: true)
+
+            if isSearchActive {
+                Button("取消") {
+                    cancelSearch()
+                }
+                .font(.system(size: 17))
+                .foregroundStyle(.tint)
+                .buttonStyle(.plain)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .opacity
+                    )
+                )
+                .accessibilityLabel("取消搜索")
+            }
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
+        .animation(.snappy(duration: 0.22), value: isSearchActive)
+    }
+
+    private var isSearchActive: Bool {
+        searchFocused || !query.isEmpty
+    }
+
+    private func cancelSearch() {
+        searchFocused = false
+        query = ""
+        searchHits = []
+        searching = false
     }
 
     private var chats: [ChatSummary] {
