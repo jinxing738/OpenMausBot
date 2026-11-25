@@ -19,9 +19,15 @@ struct ChatView: View {
     let chat: Chat
     @EnvironmentObject private var session: Session
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var draft = ""
     @State private var showingTasks = false
     @State private var shareFile: ShareFile?
+    /// StaffMate 的对话页把聊天记录和输入区拆在 ZStack 的两层，
+    /// 输入区高度通过 preference 回写给正文留白。这里沿用同一套结构。
+    @State private var composerHeight: CGFloat = 62
+    @State private var keyboardUp = false
+    @StateObject private var headerScroll = NativeListScrollModel()
     @FocusState private var composerFocused: Bool
 
     /// The live bubble's scroll target. A constant because there is at most
@@ -46,180 +52,54 @@ struct ChatView: View {
         // array as a unit; repeatedly reaching through ObservableObject for
         // every row only recomputes the same value.
         let transcript = messages
-        // A VStack with the composer as a sibling, rather than a scroll view
-        // with `.safeAreaInset`. The inset version sized itself to its
-        // content, so a short transcript left the composer floating in the
-        // middle of the screen with black beneath it. Here the scroll area is
-        // explicitly told to take everything the composer does not.
-        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    // VStack, not LazyVStack. A lazy stack does not know how
-                    // tall it is until its rows have been built, so
-                    // `.defaultScrollAnchor(.bottom)` anchors against an
-                    // estimate and the chat opens somewhere in the middle of
-                    // the conversation. Building all of it up front makes the
-                    // height exact and the anchor land on the newest message.
-                    // A thread holds 50 messages until you ask for more, so
-                    // there is nothing here worth being lazy about.
-                    VStack(alignment: .leading, spacing: 12) {
-                        if session.state.hasMore[chat.threadId] == true {
-                            Button("Load earlier messages") {
-                                // keep the reader where they were: after older
-                                // messages are prepended, sit back on the one
-                                // that used to be at the top
-                                let anchor = transcript.first?.id
-                                Task {
-                                    await session.loadOlder(threadId: chat.threadId)
-                                    if let anchor { proxy.scrollTo(anchor, anchor: .top) }
-                                }
-                            }
-                            .font(.footnote)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                        }
+        /* 页面结构逐项取自 StaffMate NativeChatDetailView：
+           ZStack 负责背景、正文、页头和输入区四层；正文用
+           safeAreaInset 给输入区留出实测高度，首条消息从页头下方 72pt
+           开始，滚动后仍可穿到玻璃按钮下面。 */
+        ZStack(alignment: .bottom) {
+            background
 
-                        ForEach(Array(transcript.enumerated()), id: \.element.id) { index, message in
-                            VStack(alignment: .leading, spacing: 12) {
-                                // a gap in time is worth marking; a timestamp
-                                // on every message is just noise
-                                if startsANewStretch(at: index, in: transcript) {
-                                    Text(RelativeStamp.separator(message.date))
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(Color.secondary)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.top, 6)
-                                }
-                                MessageRow(chat: current, message: message)
-                            }
-                            .id(message.id)
-                        }
+            conversation(transcript)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    Color.clear.frame(height: composerHeight + 8)
+                }
 
-                        // The reply as it is typed. It sits after the last
-                        // settled message and disappears the moment the real
-                        // one arrives — the store clears it on the same frame
-                        // that appends the message, so there is never a beat
-                        // where both are on screen.
-                        if let live = session.state.streaming[chat.threadId], !live.isEmpty {
-                            StreamingBubble(text: live, reasoning: nil)
-                                .id(Self.liveBubbleId)
-                        } else if let thinking = session.state.reasoning[chat.threadId], !thinking.isEmpty {
-                            // Only while there is no answer yet. Once tokens
-                            // of the reply exist, the reasoning is behind us
-                            // and showing both is just noise.
-                            StreamingBubble(text: nil, reasoning: thinking)
-                                .id(Self.liveBubbleId)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                // A conversation grows from the bottom: a transcript shorter
-                // than the screen rests at the bottom, and opening a chat
-                // starts on the newest message rather than the oldest.
-                .defaultScrollAnchor(.bottom)
-                .onChange(of: transcript.last?.id) { _, _ in
-                    guard let last = transcript.last else { return }
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
-                // Follow the text as it arrives. Keyed on length rather than
-                // the string so this fires once per delta batch, and without
-                // animation — animating every token turns a smooth stream
-                // into a stutter, because each scroll interrupts the last.
-                .onChange(of: session.state.streaming[chat.threadId]?.count ?? 0) { _, length in
-                    guard length > 0 else { return }
-                    proxy.scrollTo(Self.liveBubbleId, anchor: .bottom)
-                }
-                .onChange(of: session.focusedMessageId) { _, messageId in
-                    guard let messageId,
-                          messages.contains(where: { $0.id == messageId })
-                    else { return }
-                    withAnimation { proxy.scrollTo(messageId, anchor: .center) }
-                    session.consumeFocus(messageId)
-                }
-                .task {
-                    guard let messageId = session.focusedMessageId,
-                          messages.contains(where: { $0.id == messageId })
-                    else { return }
-                    proxy.scrollTo(messageId, anchor: .center)
-                    session.consumeFocus(messageId)
-                }
+            NativeObservedScrollHeaderFrost(model: headerScroll)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .zIndex(1)
+
+            VStack(spacing: 0) {
+                header
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .zIndex(2)
 
             composer
+                .padding(.bottom, keyboardUp ? 8 : windowBottomInset)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: ChatComposerHeightKey.self,
+                            value: proxy.size.height
+                        )
+                    }
+                }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .navigationBarTitleDisplayMode(.inline)
+        .ignoresSafeArea(.container, edges: .bottom)
         .navigationBarBackButtonHidden(true)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button { dismiss() } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.primary)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.secondary.opacity(0.16)))
-                }
+        .toolbar(.hidden, for: .navigationBar)
+        .background(NativeSwipeBackEnabler().frame(width: 0, height: 0))
+        .onPreferenceChange(ChatComposerHeightKey.self) { height in
+            if height > 0, abs(height - composerHeight) > 0.5 {
+                composerHeight = height
             }
-            ToolbarItem(placement: .principal) {
-                HStack(spacing: 8) {
-                    MausAvatar(color: current.color, size: 26)
-                    Text(current.name)
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Color.primary)
-                }
-                .padding(.leading, 6)
-                .padding(.trailing, 14)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(Color.secondary.opacity(0.16)))
-            }
-            if case let .bot(bot) = current {
-                // Rooms have no computer of their own — whichever member is
-                // speaking owns one, and picking for the reader would be a
-                // guess. Bots only.
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        ComputerView(bot: bot)
-                    } label: {
-                        Image(systemName: "display")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(Color.primary)
-                    }
-                    .accessibilityLabel("Watch \(bot.name)'s computer")
-                }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    if case let .bot(bot) = current {
-                        Button("任务", systemImage: "square.stack") { showingTasks = true }
-                            .disabled(bot.busy == true)
-                    }
-                    Button("分享为 Markdown", systemImage: "doc.plaintext") {
-                        Task {
-                            if let url = await session.export(threadId: current.threadId, format: "markdown") {
-                                shareFile = ShareFile(url: url)
-                            }
-                        }
-                    }
-                    Button("分享为 JSON", systemImage: "curlybraces") {
-                        Task {
-                            if let url = await session.export(threadId: current.threadId, format: "json") {
-                                shareFile = ShareFile(url: url)
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .accessibilityLabel("会话操作")
-            }
-            if current.busy, case let .bot(bot) = current {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("停止") { Task { await session.interrupt(bot: bot) } }
-                }
-            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            withAnimation(.easeOut(duration: 0.22)) { keyboardUp = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            withAnimation(.easeOut(duration: 0.22)) { keyboardUp = false }
         }
         .task {
             // opening a chat is what marks it read, exactly as on the desktop
@@ -239,8 +119,214 @@ struct ChatView: View {
         }
     }
 
-    /// True when this message opens a fresh stretch of conversation — the
-    /// first one, or one that follows a gap of half an hour or more.
+    /// StaffMate NativeChatDetail.swift:2893.
+    private var background: some View {
+        ZStack {
+            ChatDesign.page
+            RadialGradient(
+                colors: [
+                    ChatDesign.accent.opacity(colorScheme == .dark ? 0.12 : 0.07),
+                    .clear,
+                ],
+                center: .topLeading,
+                startRadius: 8,
+                endRadius: 340
+            )
+        }
+        .ignoresSafeArea()
+    }
+
+    /// StaffMate NativeChatDetail.swift:2917，唯一变更是右侧拆成
+    /// OpenMaus 的电脑入口和 StaffMate 的更多入口两颗独立玻璃圆钮。
+    private var header: some View {
+        ZStack {
+            HStack(spacing: 7) {
+                MausAvatar(color: current.color, size: 24)
+                Text(current.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+                    .frame(maxWidth: 132, alignment: .leading)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.leading, 4)
+            .padding(.trailing, 12)
+            .frame(height: 36)
+            .modifier(ChatHeaderIdentitySurface())
+
+            HStack(spacing: 8) {
+                Button {
+                    dismiss()
+                } label: {
+                    ChatHeaderGlassButton(size: ChatHeaderMetrics.button) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Color.primary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("返回")
+
+                Spacer(minLength: 8)
+
+                if case let .bot(bot) = current {
+                    NavigationLink {
+                        ComputerView(bot: bot)
+                    } label: {
+                        ChatHeaderGlassButton(size: ChatHeaderMetrics.button) {
+                            Image(systemName: "display")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(Color.primary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Watch \(bot.name)'s computer")
+                }
+
+                Menu {
+                    if case let .bot(bot) = current {
+                        Button("任务", systemImage: "square.stack") {
+                            showingTasks = true
+                        }
+                        .disabled(bot.busy == true)
+                    }
+                    Button("分享为 Markdown", systemImage: "doc.plaintext") {
+                        Task {
+                            if let url = await session.export(
+                                threadId: current.threadId,
+                                format: "markdown"
+                            ) {
+                                shareFile = ShareFile(url: url)
+                            }
+                        }
+                    }
+                    Button("分享为 JSON", systemImage: "curlybraces") {
+                        Task {
+                            if let url = await session.export(
+                                threadId: current.threadId,
+                                format: "json"
+                            ) {
+                                shareFile = ShareFile(url: url)
+                            }
+                        }
+                    }
+                } label: {
+                    ChatHeaderGlassButton(size: ChatHeaderMetrics.button) {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(Color.primary)
+                    }
+                }
+                .tint(.primary)
+                .accessibilityLabel("会话操作")
+            }
+        }
+        .padding(.horizontal, ChatHeaderMetrics.inset)
+        .frame(height: 56)
+    }
+
+    /// StaffMate NativeChatDetail.swift:3086.
+    private func conversation(_ transcript: [Message]) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    Color.clear
+                        .frame(height: 1)
+                        .background(
+                            NativeListScrollObserver { value in
+                                headerScroll.report(value)
+                            }
+                        )
+
+                    if session.state.hasMore[chat.threadId] == true {
+                        Button {
+                            let anchor = transcript.first?.id
+                            Task {
+                                await session.loadOlder(threadId: chat.threadId)
+                                if let anchor {
+                                    proxy.scrollTo(anchor, anchor: .top)
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "chevron.up")
+                                Text("查看更早的消息")
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.secondary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 34)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    ForEach(
+                        Array(transcript.enumerated()),
+                        id: \.element.id
+                    ) { index, message in
+                        VStack(alignment: .leading, spacing: 12) {
+                            if startsANewStretch(at: index, in: transcript) {
+                                Text(RelativeStamp.separator(message.date))
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 6)
+                            }
+                            MessageRow(chat: current, message: message)
+                                .transition(.asymmetric(
+                                    insertion: .offset(y: 16).combined(with: .opacity),
+                                    removal: .opacity
+                                ))
+                        }
+                        .id(message.id)
+                    }
+
+                    if let live = session.state.streaming[chat.threadId], !live.isEmpty {
+                        StreamingBubble(text: live, reasoning: nil)
+                            .id(Self.liveBubbleId)
+                    } else if let thinking = session.state.reasoning[chat.threadId],
+                              !thinking.isEmpty {
+                        StreamingBubble(text: nil, reasoning: thinking)
+                            .id(Self.liveBubbleId)
+                    }
+
+                    Color.clear.frame(height: 1).id("chat-bottom")
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 72)
+                .padding(.bottom, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .defaultScrollAnchor(.bottom)
+            .onChange(of: transcript.last?.id) { _, _ in
+                guard transcript.last != nil else { return }
+                withAnimation(.easeOut(duration: 0.20)) {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                }
+            }
+            .onChange(of: session.state.streaming[chat.threadId]?.count ?? 0) { _, length in
+                guard length > 0 else { return }
+                proxy.scrollTo(Self.liveBubbleId, anchor: .bottom)
+            }
+            .onChange(of: session.focusedMessageId) { _, messageId in
+                guard let messageId,
+                      messages.contains(where: { $0.id == messageId })
+                else { return }
+                withAnimation { proxy.scrollTo(messageId, anchor: .center) }
+                session.consumeFocus(messageId)
+            }
+            .task {
+                guard let messageId = session.focusedMessageId,
+                      messages.contains(where: { $0.id == messageId })
+                else { return }
+                proxy.scrollTo(messageId, anchor: .center)
+                session.consumeFocus(messageId)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// OpenMaus 原有视觉：隔半小时以上的消息保留时间分段。
     private func startsANewStretch(at index: Int, in messages: [Message]) -> Bool {
         guard index > 0 else { return true }
         return messages[index].at - messages[index - 1].at > 30 * 60 * 1000
@@ -257,45 +343,77 @@ struct ChatView: View {
         Task { await session.send(text, to: current) }
     }
 
+    /// StaffMate ChatComposer.composerBar：43pt 高，半径 21.5pt。
+    /// OpenMaus 没有附件和语音上传协议，因此不摆无法执行的圆钮。
     private var composer: some View {
-        HStack(spacing: 10) {
-            TextField("问问 \(current.name)", text: $draft, axis: .vertical)
+        HStack(alignment: .bottom, spacing: 9) {
+            HStack(alignment: .bottom, spacing: 2) {
+                TextField(
+                    "给 \(current.name) 发消息",
+                    text: $draft,
+                    axis: .vertical
+                )
+                .font(.system(size: 15.5))
                 .lineLimit(1...5)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(Capsule().fill(Color.secondary.opacity(0.16)))
                 .focused($composerFocused)
+                .padding(.leading, 14)
+                .padding(.trailing, canSend || current.busy ? 2 : 0)
+                .padding(.vertical, 10)
+                .frame(minHeight: 43, alignment: .leading)
                 .submitLabel(.send)
-                // Return sends, Shift+Return breaks the line — the shape
-                // every chat app has. `.ignored` hands the keypress back to
-                // the text field, which is what inserts the newline; there is
-                // no way to type one otherwise once Return is claimed.
                 .onKeyPress(.return, phases: .down) { press in
                     guard !press.modifiers.contains(.shift) else { return .ignored }
                     submit()
                     return .handled
                 }
-                // software keyboards have no Shift+Return, so their Return
-                // key is a send — which is what `.submitLabel(.send)` promises
                 .onSubmit(submit)
 
-            Button {
-                submit()
-            } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(Color(uiColor: .systemBackground))
-                    .frame(width: 36, height: 36)
-                    .background(
-                        Circle().fill(canSend ? Color.primary : Color.secondary.opacity(0.35))
-                    )
+                if current.busy, case let .bot(bot) = current {
+                    Button {
+                        Task { await session.interrupt(bot: bot) }
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(ChatDesign.accentInk)
+                            .frame(width: 33, height: 33)
+                            .background(ChatDesign.accent, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: 43, height: 43)
+                    .accessibilityLabel("停止任务")
+                } else if canSend {
+                    Button {
+                        submit()
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(ChatDesign.accentInk)
+                            .frame(width: 33, height: 33)
+                            .background(ChatDesign.accent, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: 43, height: 43)
+                    .accessibilityLabel("发送")
+                }
             }
-            .disabled(!canSend)
-            .animation(.easeOut(duration: 0.15), value: canSend)
+            .chatGlassSurface(
+                RoundedRectangle(cornerRadius: 21.5, style: .continuous)
+            )
+            .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.bar)
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
+        .animation(.spring(response: 0.26, dampingFraction: 0.82), value: canSend)
+        .animation(.spring(response: 0.26, dampingFraction: 0.82), value: current.busy)
+    }
+
+    private var windowBottomInset: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)?
+            .safeAreaInsets.bottom ?? 0
     }
 }
 
@@ -313,46 +431,74 @@ struct MessageRow: View {
     }
 
     var body: some View {
-        VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
-            content
+        // StaffMate ChatMessageRow：用户侧留 44pt，员工侧留 30pt。
+        HStack(alignment: .top, spacing: 8) {
+            if message.role == .user { Spacer(minLength: 44) }
 
-            if let comm = message.comm {
-                Label("Messaged \(comm.withName)", systemImage: "arrow.up.right.bubble")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.secondary)
-            }
+            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
+                content
 
-            if let reactions = message.reactions, !reactions.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(reactionGroups(reactions), id: \.emoji) { group in
-                        Button("\(group.emoji) \(group.count)") {
-                            Task { await session.react(to: message, in: chat.threadId, emoji: group.emoji) }
+                if let comm = message.comm {
+                    Label("Messaged \(comm.withName)", systemImage: "arrow.up.right.bubble")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.secondary)
+                }
+
+                if let reactions = message.reactions, !reactions.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(reactionGroups(reactions), id: \.emoji) { group in
+                            Button("\(group.emoji) \(group.count)") {
+                                Task {
+                                    await session.react(
+                                        to: message,
+                                        in: chat.threadId,
+                                        emoji: group.emoji
+                                    )
+                                }
+                            }
+                            .font(.system(size: 13))
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.capsule)
+                            .tint(group.mine ? ChatDesign.accent : Color.secondary)
                         }
-                        .font(.system(size: 13))
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.capsule)
-                        .tint(group.mine ? Color.accentColor : Color.secondary)
                     }
                 }
+
+                if versions.count > 1,
+                   let index = versions.firstIndex(where: { $0.id == message.id }),
+                   case let .bot(bot) = chat {
+                    HStack(spacing: 8) {
+                        Button {
+                            Task {
+                                await session.switchVersion(
+                                    to: versions[index - 1],
+                                    for: bot
+                                )
+                            }
+                        } label: { Image(systemName: "chevron.left") }
+                        .disabled(index == 0 || bot.busy == true)
+                        Text("\(index + 1) of \(versions.count)")
+                        Button {
+                            Task {
+                                await session.switchVersion(
+                                    to: versions[index + 1],
+                                    for: bot
+                                )
+                            }
+                        } label: { Image(systemName: "chevron.right") }
+                        .disabled(index + 1 >= versions.count || bot.busy == true)
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.secondary)
+                }
             }
 
-            if versions.count > 1, let index = versions.firstIndex(where: { $0.id == message.id }),
-               case let .bot(bot) = chat {
-                HStack(spacing: 8) {
-                    Button {
-                        Task { await session.switchVersion(to: versions[index - 1], for: bot) }
-                    } label: { Image(systemName: "chevron.left") }
-                    .disabled(index == 0 || bot.busy == true)
-                    Text("\(index + 1) of \(versions.count)")
-                    Button {
-                        Task { await session.switchVersion(to: versions[index + 1], for: bot) }
-                    } label: { Image(systemName: "chevron.right") }
-                    .disabled(index + 1 >= versions.count || bot.busy == true)
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.secondary)
-            }
+            if message.role != .user { Spacer(minLength: 30) }
         }
+        .frame(
+            maxWidth: .infinity,
+            alignment: message.role == .user ? .trailing : .leading
+        )
         .contextMenu {
             ForEach(Self.reactionChoices, id: \.self) { emoji in
                 Button(emoji) { Task { await session.react(to: message, in: chat.threadId, emoji: emoji) } }
@@ -431,39 +577,49 @@ struct TextBubble: View {
 
     var body: some View {
         let mine = message.role == .user
-        HStack {
-            if mine { Spacer(minLength: 44) }
-            VStack(alignment: .leading, spacing: 4) {
-                // rooms attribute each line to the member who said it
-                if let from = message.from {
-                    Text(from.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(MausPalette.color(from.color))
-                }
-                // Bots get markdown, you do not — the same split the desktop
-                // makes. Markdown you did not intend is worse than markdown
-                // you did: a message about `**` should show the asterisks.
-                if mine {
-                    Text(message.text ?? "")
-                        .font(.system(size: 17))
-                        .foregroundStyle(Color.primary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    MarkdownText(source: message.text ?? "")
-                        .foregroundStyle(Color.primary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            // rooms attribute each line to the member who said it
+            if let from = message.from {
+                Text(from.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(MausPalette.color(from.color))
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color.secondary.opacity(mine ? 0.24 : 0.13))
-            )
-            if !mine { Spacer(minLength: 44) }
+            // Bots get markdown, you do not — the same split the desktop
+            // makes. Markdown you did not intend is worse than markdown
+            // you did: a message about `**` should show the asterisks.
+            if mine {
+                Text(message.text ?? "")
+                    .font(.system(size: 17))
+                    .foregroundStyle(ChatDesign.accentInk)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                MarkdownText(source: message.text ?? "")
+                    .foregroundStyle(Color.primary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        // StaffMate ChatMessageRow.bubble：13 × 9、17pt 圆角、0.5pt 描边。
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
+        .background {
+            if mine {
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .fill(ChatDesign.accent)
+            } else {
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .stroke(
+                    mine ? Color.white.opacity(0.16) : Color.primary.opacity(0.06),
+                    lineWidth: 0.5
+                )
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
     }
 }
 
@@ -474,14 +630,45 @@ struct ActivityChip: View {
 
     var body: some View {
         if let tool {
-            Label {
-                Text(tool.name).lineLimit(1)
-            } icon: {
-                Image(systemName: tool.ok == false ? "exclamationmark.triangle" : "wrench.and.screwdriver")
+            // StaffMate NCWorkProcessView.header 的单步版本。
+            HStack(spacing: 3.9) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            tool.ok == false
+                                ? Color.red.opacity(0.14)
+                                : Color.primary.opacity(0.06)
+                        )
+                    Image(
+                        systemName: tool.ok == false
+                            ? "exclamationmark"
+                            : "sparkles"
+                    )
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(
+                        tool.ok == false
+                            ? Color.red.opacity(0.82)
+                            : Color.primary.opacity(0.55)
+                    )
+                }
+                .frame(width: 14, height: 14)
+                .padding(.trailing, 2.6)
+
+                Text(tool.name)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(
+                        tool.ok == false
+                            ? Color.red.opacity(0.80)
+                            : Color.primary.opacity(0.60)
+                    )
+
+                Spacer(minLength: 0)
             }
-            .font(.system(size: 13))
-            .foregroundStyle(tool.ok == false ? Color.red : Color.secondary)
-            .padding(.leading, 4)
+            .frame(maxWidth: 326, minHeight: 28, alignment: .leading)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
         }
     }
 }
@@ -519,12 +706,12 @@ struct CardView: View {
 
     var body: some View {
         if let card = message.card {
-            VStack(alignment: .leading, spacing: 12) {
+            // StaffMate AskCardView 的外层尺寸、材质和选项行参数。
+            VStack(alignment: .leading, spacing: 10) {
                 Text(card.title)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.primary)
+                    .font(.system(size: 14.5, weight: .semibold))
                 Text(card.subtitle)
-                    .font(.system(size: 15))
+                    .font(.system(size: 12))
                     .foregroundStyle(Color.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -536,17 +723,35 @@ struct CardView: View {
                 }
 
                 if card.isPending {
-                    HStack(spacing: 10) {
+                    VStack(spacing: 6) {
                         ForEach(card.options, id: \.self) { option in
-                            Button(option) {
+                            Button {
                                 answering = true
                                 Task {
                                     await session.answer(threadId: chat.threadId, card: card, choice: option)
                                     answering = false
                                 }
+                            } label: {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text(option)
+                                        .font(.system(size: 13.5))
+                                        .foregroundStyle(
+                                            Self.isRefusal(option) ? Color.secondary : Color.primary
+                                        )
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 9)
+                                .background(
+                                    Color.primary.opacity(0.05),
+                                    in: RoundedRectangle(
+                                        cornerRadius: 10,
+                                        style: .continuous
+                                    )
+                                )
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(Self.isRefusal(option) ? Color.secondary : Color.accentColor)
+                            .buttonStyle(.plain)
                             .disabled(answering)
                         }
                     }
@@ -565,7 +770,7 @@ struct CardView: View {
                                 answering = false
                             }
                         }
-                        .font(.system(size: 14))
+                        .font(.system(size: 13.5))
                         .disabled(answering)
                     }
                 } else if let answered = card.answered {
@@ -574,15 +779,15 @@ struct CardView: View {
                         .foregroundStyle(Color.secondary)
                 }
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(13)
+            .frame(maxWidth: 320, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color.secondary.opacity(0.13))
+                .ultraThinMaterial,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(card.isPending ? Color.accentColor : .clear, lineWidth: 1.5)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(ChatDesign.accent.opacity(0.22), lineWidth: 0.8)
             }
         }
     }
@@ -602,12 +807,19 @@ struct ScreenShot: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
             } else {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.secondary.opacity(0.13))
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .fill(.ultraThinMaterial)
                     .frame(height: 160)
-                    .overlay { ProgressView() }
+                    .overlay {
+                        ProgressView()
+                            .tint(ChatDesign.accent)
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 17, style: .continuous)
+                            .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+                    }
             }
         }
         .task {
@@ -644,7 +856,7 @@ struct StreamingBubble: View {
     let reasoning: String?
 
     var body: some View {
-        HStack {
+        HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
                 if let reasoning, !reasoning.isEmpty, text?.isEmpty != false {
                     // Quieter and smaller than an answer, because it is not
@@ -671,16 +883,274 @@ struct StreamingBubble: View {
                         .foregroundStyle(Color.primary)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            // 与 ChatMessageRow.bubble 完全一致，避免流式结束时气泡跳动。
+            .padding(.horizontal, 13)
+            .padding(.vertical, 9)
             .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color.secondary.opacity(0.13))
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .fill(.ultraThinMaterial)
             )
-            Spacer(minLength: 44)
+            .overlay {
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+            }
+            Spacer(minLength: 30)
         }
         // No `.textSelection` on purpose: selecting text that is still growing
         // fights the reader, and the settled bubble a frame later is
         // selectable anyway.
+    }
+}
+
+// MARK: - StaffMate shared visual primitives
+
+/// StaffMate NativePages.swift:962.
+private enum ChatDesign {
+    static var page: Color {
+        Color(UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.systemGroupedBackground
+                : UIColor(red: 0.945, green: 0.945, blue: 0.963, alpha: 1)
+        })
+    }
+
+    /// OpenMaus has no user-selectable StaffMate accent palette. Its native
+    /// accent is the project-wide system accent already used by the rest of
+    /// the iOS screens.
+    static var accent: Color { Color.accentColor }
+    static var accentInk: Color { Color.white }
+}
+
+/// StaffMate NativePages.swift:375.
+private enum ChatHeaderMetrics {
+    static let inset: CGFloat = 16
+    static let button: CGFloat = 40
+    static let navigationHeight: CGFloat = 44
+    static let headerFrostOverscan: CGFloat = 4
+
+    static var safeAreaTop: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)?
+            .safeAreaInsets.top ?? 47
+    }
+
+    static var systemHeaderOverlap: CGFloat {
+        safeAreaTop + navigationHeight
+    }
+}
+
+/// StaffMate NativePages.swift:326, copied without changing its hierarchy.
+private struct ChatGlassSurface<S: Shape>: ViewModifier {
+    let shape: S
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: shape)
+                .overlay(
+                    shape.stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                )
+        } else {
+            content
+                .background(.ultraThinMaterial, in: shape)
+                .overlay(
+                    shape.stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                )
+        }
+    }
+}
+
+private extension View {
+    func chatGlassSurface<S: Shape>(_ shape: S) -> some View {
+        modifier(ChatGlassSurface(shape: shape))
+    }
+}
+
+/// StaffMate NativePages.swift:355.
+private struct ChatHeaderGlassButton<Content: View>: View {
+    var size: CGFloat = 40
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .frame(width: size, height: size)
+            .chatGlassSurface(Circle())
+            .contentShape(Circle())
+    }
+}
+
+/// StaffMate NativeChatDetail.swift:2452.
+private struct ChatHeaderIdentitySurface: ViewModifier {
+    func body(content: Content) -> some View {
+        content.chatGlassSurface(Capsule(style: .continuous))
+    }
+}
+
+/// StaffMate NativeChatDetail.swift:12.
+private struct ChatComposerHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// StaffMate NativePages.swift:1018. Hiding the system navigation bar also
+/// disables the system's edge swipe unless it is explicitly reinstated.
+private struct NativeSwipeBackEnabler: UIViewControllerRepresentable {
+    final class Probe: UIViewController, UIGestureRecognizerDelegate {
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            enable()
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            enable()
+        }
+
+        private func enable() {
+            guard let navigationController else { return }
+            navigationController.interactivePopGestureRecognizer?.isEnabled = true
+            navigationController.interactivePopGestureRecognizer?.delegate = self
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            (navigationController?.viewControllers.count ?? 0) > 1
+        }
+    }
+
+    func makeUIViewController(context: Context) -> Probe {
+        Probe()
+    }
+
+    func updateUIViewController(_ controller: Probe, context: Context) {}
+}
+
+/// StaffMate NativePages.swift:408.
+@MainActor
+private final class NativeListScrollModel: ObservableObject {
+    @Published private(set) var headerProgress: CGFloat = 0
+
+    func report(_ scrolled: CGFloat) {
+        let next = min(1, max(0, (scrolled - 2) / 42))
+        if abs(next - headerProgress) > 0.005 {
+            headerProgress = next
+        }
+    }
+}
+
+/// StaffMate NativePages.swift:454. The chat list only needs the observer's
+/// scroll channel; the source file's group-picker snapping is not part of a
+/// conversation and is therefore not carried over.
+private struct NativeListScrollObserver: UIViewRepresentable {
+    let onScroll: (CGFloat) -> Void
+
+    func makeUIView(context: Context) -> Probe {
+        Probe(onScroll: onScroll)
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {
+        uiView.onScroll = onScroll
+    }
+
+    final class Probe: UIView {
+        var onScroll: (CGFloat) -> Void
+        private var offsetObservation: NSKeyValueObservation?
+        private weak var scrollView: UIScrollView?
+
+        init(onScroll: @escaping (CGFloat) -> Void) {
+            self.onScroll = onScroll
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else {
+                offsetObservation = nil
+                scrollView = nil
+                return
+            }
+            DispatchQueue.main.async { [weak self] in self?.attach() }
+        }
+
+        private func attach() {
+            guard offsetObservation == nil else { return }
+            var view = superview
+            while let current = view {
+                if let scroll = current as? UIScrollView {
+                    scrollView = scroll
+                    offsetObservation = scroll.observe(
+                        \.contentOffset,
+                        options: [.new, .initial]
+                    ) { [weak self, weak scroll] _, _ in
+                        guard let self, let scroll else { return }
+                        let value = max(
+                            0,
+                            scroll.contentOffset.y + scroll.adjustedContentInset.top
+                        )
+                        if Thread.isMainThread {
+                            self.onScroll(value)
+                        } else {
+                            DispatchQueue.main.async { [weak self] in
+                                self?.onScroll(value)
+                            }
+                        }
+                    }
+                    return
+                }
+                view = current.superview
+            }
+        }
+    }
+}
+
+/// StaffMate NativePages.swift:621.
+private struct NativeScrollHeaderFrost: View {
+    let progress: CGFloat
+
+    private var amount: CGFloat {
+        min(1, max(0, progress))
+    }
+
+    var body: some View {
+        Rectangle()
+            .fill(.ultraThinMaterial)
+            .frame(
+                height: ChatHeaderMetrics.systemHeaderOverlap
+                    + ChatHeaderMetrics.headerFrostOverscan
+            )
+            .frame(maxWidth: .infinity, alignment: .top)
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black.opacity(0.95), location: 0),
+                        .init(color: .black.opacity(0.68), location: 0.58),
+                        .init(color: .black.opacity(0.45), location: 0.86),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .opacity(amount)
+            .ignoresSafeArea(edges: .top)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// StaffMate NativePages.swift:661.
+private struct NativeObservedScrollHeaderFrost: View {
+    @ObservedObject var model: NativeListScrollModel
+
+    var body: some View {
+        NativeScrollHeaderFrost(progress: model.headerProgress)
     }
 }
