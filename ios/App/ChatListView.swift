@@ -17,6 +17,9 @@ struct ChatListView: View {
     @State private var searchHits: [SearchHit] = []
     @State private var searching = false
     @FocusState private var searchFocused: Bool
+    @State private var showingCreateMenu = false
+    @State private var showingNewGroup = false
+    @State private var groupToOpen: Room?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -104,6 +107,34 @@ struct ChatListView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Chat.self) { ChatView(chat: $0) }
+            .confirmationDialog("新建", isPresented: $showingCreateMenu, titleVisibility: .visible) {
+                Button("新建 Bot") {
+                    Task {
+                        if let bot = await session.createBot() {
+                            path.append(Chat.bot(bot))
+                        }
+                    }
+                }
+                Button("新建群组") {
+                    Task { @MainActor in
+                        // Let the system action card finish dismissing before
+                        // presenting the group editor.
+                        try? await Task.sleep(for: .milliseconds(220))
+                        showingNewGroup = true
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            }
+            .sheet(isPresented: $showingNewGroup, onDismiss: openPendingGroup) {
+                NewGroupSheet { room in
+                    groupToOpen = room
+                    showingNewGroup = false
+                }
+                .environmentObject(session)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+            }
             .task(id: query) {
                 let expected = query
                 guard expected.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2 else {
@@ -129,9 +160,7 @@ struct ChatListView: View {
             Spacer(minLength: 12)
 
             Button {
-                Task {
-                    if let bot = await session.createBot() { path.append(Chat.bot(bot)) }
-                }
+                showingCreateMenu = true
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 17, weight: .semibold))
@@ -147,6 +176,12 @@ struct ChatListView: View {
         .padding(.top, 8)
         .padding(.bottom, 8)
         .frame(height: 60)
+    }
+
+    private func openPendingGroup() {
+        guard let room = groupToOpen else { return }
+        groupToOpen = nil
+        path.append(Chat.room(room))
     }
 
     private var bottomTools: some View {
@@ -239,6 +274,98 @@ struct ChatListView: View {
         if let bot = session.state.bot(forThread: threadId) { return .bot(bot) }
         if let room = session.state.room(forThread: threadId) { return .room(room) }
         return nil
+    }
+}
+
+private struct NewGroupSheet: View {
+    @EnvironmentObject private var session: Session
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name = ""
+    @State private var picked = Set<String>()
+    @State private var creating = false
+
+    let onCreated: (Room) -> Void
+
+    private var bots: [Bot] {
+        session.state.bots.filter { $0.hidden != true }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("群组名称（可选）", text: $name)
+                        .textInputAutocapitalization(.never)
+                }
+
+                Section("成员") {
+                    if bots.isEmpty {
+                        Text("请先创建至少一个机器人。")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(bots) { bot in
+                            Button {
+                                if picked.contains(bot.id) {
+                                    picked.remove(bot.id)
+                                } else {
+                                    picked.insert(bot.id)
+                                }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    MausAvatar(color: bot.color, size: 34)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(bot.name)
+                                            .foregroundStyle(Color.primary)
+                                        if !bot.title.isEmpty {
+                                            Text(bot.title)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Image(systemName: picked.contains(bot.id) ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 20))
+                                        .foregroundStyle(picked.contains(bot.id) ? Color.accentColor : Color.secondary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("新建群组")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("创建", action: create)
+                        .disabled(picked.isEmpty || creating)
+                }
+            }
+            .overlay {
+                if creating {
+                    ProgressView()
+                        .padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                }
+            }
+            .interactiveDismissDisabled(creating)
+        }
+    }
+
+    private func create() {
+        guard !picked.isEmpty, !creating else { return }
+        creating = true
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            let room = await session.createGroup(name: trimmed, memberIds: Array(picked))
+            creating = false
+            if let room { onCreated(room) }
+        }
     }
 }
 

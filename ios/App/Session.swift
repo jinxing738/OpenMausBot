@@ -333,6 +333,21 @@ final class Session: ObservableObject {
         }
     }
 
+    /// Make a room and fold it in immediately. The harness does not send a
+    /// room announcement for creation, so the response is the first copy this
+    /// phone sees.
+    func createGroup(name: String, memberIds: [String]) async -> Room? {
+        guard let client, !memberIds.isEmpty else { return nil }
+        do {
+            let room = try await client.createGroup(name: name, memberIds: memberIds)
+            state.apply(.room(room))
+            return room
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
     func interrupt(bot: Bot) async {
         await perform { try await $0.interrupt(botId: bot.id) }
     }

@@ -335,6 +335,14 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("POST", "/api/bots"), as: CreatedBot.self).bot
     }
 
+    /// Make a room from bots this phone can already see. The desktop accepts
+    /// an omitted name and lets the harness pick its default.
+    public func createGroup(name: String, memberIds: [String]) async throws -> Room {
+        var body: [String: Any] = ["memberIds": memberIds]
+        if !name.isEmpty { body["name"] = name }
+        return try await send(try makeRequest("POST", "/api/groups", body: body), as: CreatedGroup.self).group
+    }
+
     public func send(text: String, toBot botId: String) async throws {
         try await send(try makeRequest("POST", "/api/bots/\(botId)/messages", body: ["text": text]))
     }

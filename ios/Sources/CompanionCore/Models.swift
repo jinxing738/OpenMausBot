@@ -399,6 +399,11 @@ public struct CreatedBot: Codable, Sendable {
     public var bot: Bot
 }
 
+/// `POST /api/groups` — the harness answers with the room it made.
+public struct CreatedGroup: Codable, Sendable {
+    public var group: Room
+}
+
 struct SearchResponse: Codable, Sendable {
     var hits: [SearchHit]
 }
