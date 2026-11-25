@@ -97,6 +97,11 @@ struct ChatListView: View {
             .overlay(alignment: .bottom) { bottomTools }
             // top-aligned: the roster fills downward from the header
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background {
+                InteractivePopGestureEnabler()
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+            }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Chat.self) { ChatView(chat: $0) }
             .task(id: query) {
@@ -234,6 +239,52 @@ struct ChatListView: View {
         if let bot = session.state.bot(forThread: threadId) { return .bot(bot) }
         if let room = session.state.room(forThread: threadId) { return .room(room) }
         return nil
+    }
+}
+
+private struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> InteractivePopGestureViewController {
+        InteractivePopGestureViewController()
+    }
+
+    func updateUIViewController(
+        _ controller: InteractivePopGestureViewController,
+        context: Context
+    ) {
+        controller.install()
+    }
+}
+
+private final class InteractivePopGestureViewController: UIViewController {
+    private let popDelegate = InteractivePopGestureDelegate()
+
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        install()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        install()
+    }
+
+    func install() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let navigationController else { return }
+            popDelegate.navigationController = navigationController
+            navigationController.interactivePopGestureRecognizer?.delegate = popDelegate
+            navigationController.interactivePopGestureRecognizer?.isEnabled = true
+        }
+    }
+}
+
+private final class InteractivePopGestureDelegate: NSObject, UIGestureRecognizerDelegate {
+    weak var navigationController: UINavigationController?
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard let navigationController else { return false }
+        return navigationController.viewControllers.count > 1
+            && navigationController.transitionCoordinator == nil
     }
 }
 
