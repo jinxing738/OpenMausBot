@@ -659,7 +659,7 @@ export function SidebarProfileMenu({ iconOnly = false, rail = false, circle = fa
           <span
             ref={triggerRef}
             data-sidebar-account=""
-            className={cn("relative flex size-9 items-center justify-center rounded-full ring-2 transition-shadow", open ? "ring-ink/15" : "ring-transparent hover:ring-ink/10")}
+            className={cn("relative flex size-11 items-center justify-center rounded-full ring-2 transition-shadow", open ? "ring-ink/15" : "ring-transparent hover:ring-ink/10")}
           >
             <InitialsAvatar initials={initials} avatarUrl={profile?.avatarUrl} size={36} fallback={nameless} fontSize={14} className="ring-1 ring-inset ring-ink/[0.04]" />
             {dot && <span aria-hidden data-account-dot={dot} className={cn("absolute -right-0.5 -top-0.5 size-2.5 rounded-full ring-2 ring-panel", DOT_COLOR[dot])} />}
@@ -670,7 +670,7 @@ export function SidebarProfileMenu({ iconOnly = false, rail = false, circle = fa
             className={cn(
               "relative flex items-center justify-center rounded-xl transition-colors",
               rail ? "size-10" : "size-[46px]",
-              circle && "size-10 rounded-full border border-hairline bg-card",
+              circle && "size-11 rounded-full border border-hairline bg-card",
               open ? "bg-raised" : "hover:bg-raised/50",
             )}
           >

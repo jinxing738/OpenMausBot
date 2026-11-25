@@ -88,14 +88,14 @@ export function SidebarPhoneBar({ query, onQuery }: { query: string; onQuery: (q
             placeholder={t("sidebar.search")}
             aria-label={t("sidebar.searchAria")}
             enterKeyHint="search"
-            className="min-w-0 flex-1 bg-transparent text-[15px] text-ink placeholder:text-ink-secondary focus:outline-none"
+            className="h-full min-w-0 flex-1 self-stretch bg-transparent text-[15px] text-ink placeholder:text-ink-secondary focus:outline-none"
           />
           {query !== "" && (
             <button
               type="button"
               onClick={() => onQuery("")}
               aria-label={t("sidebar.searchClose")}
-              className="flex size-7 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus"
+              className="relative flex size-7 shrink-0 items-center justify-center rounded-full text-ink-secondary before:absolute before:-inset-2 before:content-[''] hover:bg-raised hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus"
             >
               <X size={15} aria-hidden="true" />
             </button>
