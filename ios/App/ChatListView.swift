@@ -194,21 +194,19 @@ struct ChatListView: View {
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(.primary)
                         .frame(width: 44, height: 44)
+                        .floatingGlass(Circle(), interactive: true)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SearchDismissButtonStyle())
                 .transition(
-                    .asymmetric(
-                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .opacity
-                    )
+                    .scale(scale: 0.72, anchor: .trailing).combined(with: .opacity)
                 )
                 .accessibilityLabel("取消搜索")
             }
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
-        .animation(.snappy(duration: 0.22), value: isSearchActive)
+        .animation(.spring(response: 0.3, dampingFraction: 0.72), value: isSearchActive)
     }
 
     private var isSearchActive: Bool {
@@ -236,6 +234,18 @@ struct ChatListView: View {
         if let bot = session.state.bot(forThread: threadId) { return .bot(bot) }
         if let room = session.state.room(forThread: threadId) { return .room(room) }
         return nil
+    }
+}
+
+private struct SearchDismissButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .animation(
+                .spring(response: 0.22, dampingFraction: 0.72),
+                value: configuration.isPressed
+            )
     }
 }
 
