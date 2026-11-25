@@ -670,7 +670,7 @@ struct ChatView: View {
                                 teachATask()
                             }
                         )
-                        .offset(y: -(ComposerActionCard.height + 10))
+                        .offset(y: -(ComposerActionCard.height + 8))
                         .transition(
                             .scale(scale: 0.92, anchor: .bottomLeading)
                                 .combined(with: .opacity)
