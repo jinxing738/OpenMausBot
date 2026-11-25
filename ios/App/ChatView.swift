@@ -83,6 +83,19 @@ struct ChatView: View {
             }
             .zIndex(2)
 
+            if showingComposerMenu {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            showingComposerMenu = false
+                        }
+                    }
+                    .accessibilityHidden(true)
+                    .zIndex(3)
+            }
+
             composer
                 .padding(.bottom, keyboardUp ? 8 : windowBottomInset)
                 .background {
@@ -93,6 +106,7 @@ struct ChatView: View {
                         )
                     }
                 }
+                .zIndex(4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .ignoresSafeArea(.container, edges: .bottom)
@@ -638,21 +652,31 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("添加附件或教它一项任务")
-                .popover(isPresented: $showingComposerMenu, arrowEdge: .bottom) {
-                    ComposerActionCard(
-                        addAttachment: {
-                            showingComposerMenu = false
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                                showingAttachmentKinds = true
+                .overlay(alignment: .topLeading) {
+                    if showingComposerMenu {
+                        ComposerActionCard(
+                            addAttachment: {
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    showingComposerMenu = false
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                                    showingAttachmentKinds = true
+                                }
+                            },
+                            teachTask: {
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    showingComposerMenu = false
+                                }
+                                teachATask()
                             }
-                        },
-                        teachTask: {
-                            showingComposerMenu = false
-                            teachATask()
-                        }
-                    )
-                    .presentationCompactAdaptation(.popover)
-                    .presentationBackground(.clear)
+                        )
+                        .offset(y: -(ComposerActionCard.height + 10))
+                        .transition(
+                            .scale(scale: 0.92, anchor: .bottomLeading)
+                                .combined(with: .opacity)
+                        )
+                        .zIndex(2)
+                    }
                 }
 
                 HStack(alignment: .bottom, spacing: 2) {
@@ -702,12 +726,21 @@ struct ChatView: View {
                         .buttonStyle(.plain)
                         .frame(width: 43, height: 43)
                         .accessibilityLabel("发送")
-                        .transition(
-                            .asymmetric(
-                                insertion: .scale(scale: 0.62).combined(with: .opacity),
-                                removal: .scale(scale: 0.82).combined(with: .opacity)
-                            )
-                        )
+                    } else {
+                        Button {
+                            composerFocused = true
+                        } label: {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 15.5, weight: .semibold))
+                                .symbolRenderingMode(.monochrome)
+                                .foregroundStyle(Color.primary)
+                                .frame(width: 33, height: 33)
+                                .background(Color.primary.opacity(0.07), in: Circle())
+                                .frame(width: 43, height: 43)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("开始输入")
                     }
                 }
                 .chatGlassSurface(
@@ -813,6 +846,9 @@ private struct PreparedDraftImage {
 }
 
 private struct ComposerActionCard: View {
+    static let width: CGFloat = 246
+    static let height: CGFloat = 121
+
     let addAttachment: () -> Void
     let teachTask: () -> Void
 
@@ -834,7 +870,7 @@ private struct ComposerActionCard: View {
             )
         }
         .padding(6)
-        .frame(width: 246)
+        .frame(width: Self.width, height: Self.height)
         .background(
             .ultraThinMaterial,
             in: RoundedRectangle(cornerRadius: 20, style: .continuous)
