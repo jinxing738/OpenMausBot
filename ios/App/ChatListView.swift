@@ -187,14 +187,16 @@ struct ChatListView: View {
             .floatingGlass(Capsule(), interactive: true)
 
             if isSearchActive {
-                Button("取消") {
+                Button {
                     cancelSearch()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
-                .font(.system(size: 17))
-                .foregroundStyle(.tint)
                 .buttonStyle(.plain)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
                 .transition(
                     .asymmetric(
                         insertion: .move(edge: .trailing).combined(with: .opacity),
